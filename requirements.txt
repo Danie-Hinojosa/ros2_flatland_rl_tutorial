@@ -1,0 +1,19 @@
+# Python dependencies for the Reinforcement Learning controller (DQN).
+#
+# Installed in the ROS 2 Humble container into the user site (~/.local) so it
+# does NOT clobber the system numpy/opencv/matplotlib that ros-humble-desktop
+# ships:
+#
+#   pip3 install --user -r requirements.txt
+#
+# Notes:
+# - torch comes from PyPI (the GPU/CUDA build; the container already has CUDA).
+#   On a CPU-only host use: pip install torch --index-url https://download.pytorch.org/whl/cpu
+# - opencv-python and matplotlib are pinned to NumPy-2-compatible wheels because
+#   stable-baselines3 imports cv2 and matplotlib at import time, and the system
+#   builds were compiled against NumPy 1.x.
+torch
+stable-baselines3>=2.0.0
+gymnasium
+opencv-python
+matplotlib>=3.7

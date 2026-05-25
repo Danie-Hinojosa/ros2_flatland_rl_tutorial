@@ -1,0 +1,10 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Old PPO model from the original tutorial run (this fork delivers DQN)
+/ppo.zip
+
+# Tensorboard logs (we use the Monitor CSV + matplotlib instead)
+results/tb/

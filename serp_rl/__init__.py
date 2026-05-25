@@ -1,34 +1,47 @@
 #!/usr/bin/env python3
+import os
+import json
+import time
+import threading
+import numpy as np
+
 import rclpy
-from rclpy.publisher import Publisher
 from rclpy.node import Node
+from rclpy.publisher import Publisher
+
 from geometry_msgs.msg import Twist, Pose2D
 from sensor_msgs.msg import LaserScan
 from flatland_msgs.srv import MoveModel
 from flatland_msgs.msg import Collisions
 
-from gym import Env
-from gym.spaces import Discrete, Box
+import gymnasium as gym
+from gymnasium import spaces
 
-from stable_baselines3 import PPO
+# RL algorithm: DQN (Deep Q-Network) instead of the tutorial's default PPO.
+# DQN is an off-policy, value-based algorithm that fits a discrete action
+# space (here Discrete(3)), in contrast to PPO which is on-policy/policy-gradient.
+from stable_baselines3 import DQN
 from stable_baselines3.common.env_checker import check_env
+from stable_baselines3.common.monitor import Monitor
 
-import numpy as np
-import time
-import threading
 
-class SerpControllerEnv(Node, Env):
+class SerpControllerEnv(Node, gym.Env):
+    metadata = {"render_modes": []}
+
     def __init__(self) -> None:
-        super().__init__("SerpControllerEnv")
+        Node.__init__(self, "SerpControllerEnv")
+        gym.Env.__init__(self)
 
         # Predefined speed for the robot
         linear_speed = 0.5
         angular_speed = 1.57079632679
 
-        # Set of actions. Defined by their linear and angular speed
-        self.actions = [(linear_speed, 0.0), # move forward
-                        (0.0, angular_speed), # rotate left
-                        (0.0, -angular_speed)] # rotate right
+        # Set of actions: (linear, angular)
+        self.actions = [
+            (linear_speed, 0.0),     # move forward
+            (0.0, angular_speed),    # rotate left
+            (0.0, -angular_speed),   # rotate right
+        ]
 
         # How close the robot needs to be to the target to finish the task
         self.end_range = 0.2
@@ -38,266 +51,347 @@ class SerpControllerEnv(Node, Env):
         self.lidar_sample = []
 
         # Variables that track a possible end state
-        # current distance to target
         self.distance_to_end = 10.0
-        # true if a collision happens
         self.collision = False
 
         # Possible starting positions
-        self.start_positions = [(0.0, 0.0, 1.57079632679), (1.6, 1.6, 3.14159265359)]
-        # Current position
+        self.start_positions = [
+            (0.0, 0.0, 1.57079632679),
+            (1.6, 1.6, 3.14159265359),
+        ]
         self.position = 0
 
         self.step_number = 0
-
-        # Maximum number of steps before it times out
         self.max_steps = 200
-
-        # Records previous action taken. At the start of an episode, there is no prior action so -1 is assigned
         self.previous_action = -1
 
         # Used for data collection during training
         self.total_step_cnt = 0
         self.total_episode_cnt = 0
         self.training = False
-                                    
-        # **** Create publishers ****
-        self.pub:Publisher = self.create_publisher(Twist, "/cmd_vel", 1)
-        # ***************************
 
-        # **** Create subscriptions ****
-        self.create_subscription(LaserScan, "/static_laser", self.processLiDAR, 1)
+        # ROS publishers/subscribers
+        self.pub: Publisher = self.create_publisher(Twist, "/cmd_vel", 1)
 
-        self.create_subscription(LaserScan, "/end_beacon_laser", self.processEndLiDAR, 1)
+        self.create_subscription(LaserScan, "/static_laser", self.process_lidar, 1)
+        self.create_subscription(LaserScan, "/end_beacon_laser", self.process_end_lidar, 1)
+        self.create_subscription(Collisions, "/collisions", self.process_collisions, 1)
 
-        self.create_subscription(Collisions, "/collisions", self.processCollisions, 1)
-        # ******************************
+        # Gymnasium spaces
+        self.action_space = spaces.Discrete(len(self.actions))
+        self.observation_space = spaces.Box(
+            low=0.0,
+            high=2.0,
+            shape=(self.n_lidar_sections,),
+            dtype=np.float32,
+        )
 
-        # **** Define action and state spaces ****
+        self.state = np.zeros((self.n_lidar_sections,), dtype=np.float32)
 
-        # action is an integer between 0 and 2 (total of 3 actions)
-        self.action_space = Discrete(len(self.actions))
-        # state is represented by a numpy.Array with size 9 and values between 0 and 2
-        self.observation_space = Box(0, 2, shape=(self.n_lidar_sections,), dtype=np.float64)
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
 
-        # ****************************************
+        # Stop robot
+        self.change_robot_speeds(0.0, 0.0)
 
-        # Initial state
-        self.state = np.array(self.lidar_sample)
+        if self.total_step_cnt != 0:
+            self.total_episode_cnt += 1
 
-    # Resets the environment to an initial state
-    def reset(self):
-        # Make sure the robot is stopped
-        self.change_robot_speeds(self.pub, 0.0, 0.0)
-
-        if self.total_step_cnt != 0: self.total_episode_cnt += 1
-
-        # **** Move robot and end beacon to new positions ****
+        # Move robot and end beacon
         start_pos = self.start_positions[self.position]
         self.position = 1 - self.position
         end_pos = self.start_positions[self.position]
-        
-        self.move_model('serp', start_pos[0], start_pos[1], start_pos[2])
-        self.move_model('end_beacon', end_pos[0], end_pos[1], 0.0)
-        # ****************************************************
 
-        # **** Reset necessary values ****
+        self.move_model("serp", start_pos[0], start_pos[1], start_pos[2])
+        self.move_model("end_beacon", end_pos[0], end_pos[1], 0.0)
+
+        # Reset variables
         self.lidar_sample = []
         self.wait_lidar_reading()
-        self.state = np.array(self.lidar_sample)
 
-        # Flatland can sometimes send several collision messages. 
-        # This makes sure that no collisions are wrongfully detected at the start of an episode 
+        # Flatland can sometimes send several collision messages
         time.sleep(0.1)
 
         self.distance_to_end = 10.0
         self.collision = False
         self.step_number = 0
         self.previous_action = -1
-        # ********************************
 
-        return self.state
+        self.state = np.array(self.lidar_sample, dtype=np.float32)
+        info = {}
 
-    # Performs a step for the RL agent
-    def step(self, action): 
+        return self.state, info
 
-        # **** Performs the action and waits for it to be completed ****
-        self.change_robot_speeds(self.pub, self.actions[action][0], self.actions[action][1])
+    def step(self, action):
+        if isinstance(action, np.ndarray):
+            action = int(action.item())
+        else:
+            action = int(action)
+
+        # Perform action
+        self.change_robot_speeds(self.actions[action][0], self.actions[action][1])
 
         self.lidar_sample = []
         self.wait_lidar_reading()
-        self.change_robot_speeds(self.pub, 0.0, 0.0)
-        # **************************************************************
+        self.change_robot_speeds(0.0, 0.0)
 
-        # Register current state
-        self.state = np.array(self.lidar_sample)
+        self.state = np.array(self.lidar_sample, dtype=np.float32)
 
         self.step_number += 1
         self.total_step_cnt += 1
 
-        # **** Calculates the reward and determines if an end state was reached ****
-        done = False
-
-        end_state = ''
+        terminated = False
+        truncated = False
+        end_state = ""
 
         if self.collision:
-            end_state = "colision"
-            reward = -200
-            done = True
+            end_state = "collision"
+            reward = -200.0
+            terminated = True
         elif self.distance_to_end < self.end_range:
             end_state = "finished"
-            reward = 400 + (200 - self.step_number)
-            done = True
+            reward = 400.0 + (200 - self.step_number)
+            terminated = True
         elif self.step_number >= self.max_steps:
             end_state = "timeout"
-            reward = -300 
-            done = True
+            reward = -300.0
+            truncated = True
         elif action == 0:
-            reward = 2
+            reward = 2.0
         else:
-            reward = 0
-        # **************************************************************************
+            reward = 0.0
 
-        info = {'end_state': end_state}
+        info = {"end_state": end_state}
 
-        if done and self.training:
-            self.get_logger().info('Training - Episode ' + str(self.total_episode_cnt) + ' end state: ' + end_state)
-            self.get_logger().info('Total steps: ' + str(self.total_step_cnt))
+        if (terminated or truncated) and self.training:
+            self.get_logger().info(
+                f"Training - Episode {self.total_episode_cnt} end state: {end_state}"
+            )
+            self.get_logger().info(f"Total steps: {self.total_step_cnt}")
 
-        return self.state, reward, done, info
+        self.previous_action = action
 
-    def render(self): pass
+        return self.state, reward, terminated, truncated, info
 
-    def close(self): pass
+    def render(self):
+        pass
+
+    def close(self):
+        self.change_robot_speeds(0.0, 0.0)
 
     def reset_counters(self):
         self.total_step_cnt = 0
         self.total_episode_cnt = 0
 
-    # Change the speed of the robot
-    def change_robot_speeds(self, publisher, linear, angular):
+    def change_robot_speeds(self, linear, angular):
         twist_msg = Twist()
-        twist_msg.linear.x = linear
-        twist_msg.angular.z = angular
-        publisher.publish(twist_msg)
+        twist_msg.linear.x = float(linear)
+        twist_msg.angular.z = float(angular)
+        self.pub.publish(twist_msg)
 
-    # Waits for a new LiDAR reading.
-    # A new LiDAR reading is also used to signal when an action should finish being performed.
-    def wait_lidar_reading(self):
-        while len(self.lidar_sample) != self.n_lidar_sections: pass
+    def wait_lidar_reading(self, timeout_sec=2.0):
+        start = time.time()
+        while len(self.lidar_sample) != self.n_lidar_sections:
+            if time.time() - start > timeout_sec:
+                self.get_logger().warn("Timed out waiting for LiDAR reading.")
+                self.lidar_sample = [2.0] * self.n_lidar_sections
+                break
+            time.sleep(0.001)
 
-    # Send a request to move a model
     def move_model(self, model_name, x, y, theta):
         client = self.create_client(MoveModel, "/move_model")
-        client.wait_for_service()
+        while not client.wait_for_service(timeout_sec=1.0):
+            self.get_logger().info("/move_model service not available, waiting again...")
+
         request = MoveModel.Request()
         request.name = model_name
         request.pose = Pose2D()
-        request.pose.x = x
-        request.pose.y = y
-        request.pose.theta = theta
-        client.call_async(request)
-    
-    # Sample LiDAR data
-    # Divite into sections and sample the lowest value from each
-    def processLiDAR(self, data):
+        request.pose.x = float(x)
+        request.pose.y = float(y)
+        request.pose.theta = float(theta)
+
+        future = client.call_async(request)
+        return future
+
+    def process_lidar(self, data):
         self.lidar_sample = []
 
-        rays = data.ranges
-        rays_per_section = len(rays) // self.n_lidar_sections
+        rays = list(data.ranges)
+        if len(rays) == 0:
+            return
+
+        clean_rays = []
+        for r in rays:
+            if np.isnan(r) or np.isinf(r):
+                clean_rays.append(2.0)
+            else:
+                clean_rays.append(float(np.clip(r, 0.0, 2.0)))
+
+        rays_per_section = max(1, len(clean_rays) // self.n_lidar_sections)
 
         for i in range(self.n_lidar_sections - 1):
-            self.lidar_sample.append(min(rays[rays_per_section * i:rays_per_section * (i + 1)]))
-        self.lidar_sample.append(min(rays[(self.n_lidar_sections - 1) * rays_per_section:]))
+            section = clean_rays[rays_per_section * i : rays_per_section * (i + 1)]
+            self.lidar_sample.append(min(section) if section else 2.0)
 
-    
-    # Handle end beacon LiDAR data
-    # Lowest value is the distance from robot to target
-    def processEndLiDAR(self, data):
-        clean_data = [x for x in data.ranges if str(x) != 'nan']
-        if not clean_data: return
+        last_section = clean_rays[(self.n_lidar_sections - 1) * rays_per_section :]
+        self.lidar_sample.append(min(last_section) if last_section else 2.0)
+
+    def process_end_lidar(self, data):
+        clean_data = []
+        for x in data.ranges:
+            if not np.isnan(x) and not np.isinf(x):
+                clean_data.append(float(x))
+
+        if not clean_data:
+            return
+
         self.distance_to_end = min(clean_data)
-    
-    # Process collisions
-    def processCollisions(self, data):
+
+    def process_collisions(self, data):
         if len(data.collisions) > 0:
             self.collision = True
 
-    # Run an entire episode manually for testing purposes
-    # return true if succesful
     def run_episode(self, agent):
-        
-        com_reward = 0
+        cumulative_reward = 0.0
 
-        obs = self.reset()
-        done = False
-        while not done:
-            action, states = agent.predict(obs)
-            obs, rewards, done, info = self.step(action)
-            com_reward += rewards
-        
-        self.get_logger().info('Episode concluded. End state: ' + info['end_state'] + '  Commulative reward: ' + str(com_reward))
+        obs, info = self.reset()
+        terminated = False
+        truncated = False
 
-        return info['end_state'] == 'finished'
+        while not (terminated or truncated):
+            action, _states = agent.predict(obs, deterministic=True)
+            obs, reward, terminated, truncated, info = self.step(action)
+            cumulative_reward += reward
+
+        self.get_logger().info(
+            f"Episode concluded. End state: {info['end_state']}  Cumulative reward: {cumulative_reward}"
+        )
+
+        return info["end_state"] == "finished"
 
     def run_rl_alg(self):
+        # ---- Configuration (overridable via environment variables) ----
+        # Total training timesteps. Use a small value (e.g. RL_TIMESTEPS=2000)
+        # for a quick smoke test, larger for a real training run.
+        total_timesteps = int(os.environ.get("RL_TIMESTEPS", "50000"))
+        n_test_episodes = int(os.environ.get("RL_TEST_EPISODES", "20"))
+        results_dir = os.environ.get(
+            "RL_RESULTS_DIR",
+            "/workspace/ros2_ws/src/ros2_flatland_rl_tutorial/results",
+        )
+        os.makedirs(results_dir, exist_ok=True)
 
-        check_env(self)
+        # Wait until at least one lidar reading exists
         self.wait_lidar_reading()
 
-        # Create the agent
-        agent = PPO("MlpPolicy", self, verbose=1)
+        # Check environment compatibility (Gymnasium API)
+        check_env(self, warn=True)
 
-        # Target accuracy
-        min_accuracy = 0.8
-        # Current accuracy
-        accuracy = 0
-        # Number of tested episodes in each iteration
-        n_test_episodes = 20
+        # Monitor wraps the env so every training episode's reward/length is
+        # logged to a CSV that we later turn into the learning (reward) curve.
+        monitor_path = os.path.join(results_dir, "dqn_monitor")
+        monitored_env = Monitor(self, filename=monitor_path)
 
-        training_iterations = 0
+        # ---- Create the DQN agent ----
+        # Hyper-parameters tuned for this small discrete task. DQN keeps a
+        # replay buffer (off-policy) and uses epsilon-greedy exploration that
+        # decays over the first `exploration_fraction` of training.
+        agent = DQN(
+            "MlpPolicy",
+            monitored_env,
+            verbose=1,
+            learning_rate=1e-3,
+            buffer_size=50000,
+            learning_starts=1000,
+            batch_size=64,
+            gamma=0.99,
+            train_freq=4,
+            gradient_steps=1,
+            target_update_interval=500,
+            exploration_fraction=0.3,
+            exploration_initial_eps=1.0,
+            exploration_final_eps=0.05,
+        )
 
-        while accuracy < min_accuracy:
-            training_steps= 5000
-            self.get_logger().info('Starting training for ' + str(training_steps) + ' steps')
+        # ---- Train ----
+        self.get_logger().info(f"Starting DQN training for {total_timesteps} timesteps")
+        self.training = True
+        self.reset_counters()
 
-            self.training = True
-            self.reset_counters()
+        agent.learn(total_timesteps=total_timesteps, log_interval=10)
 
-            # Train the agent
-            agent.learn(total_timesteps=training_steps)
+        self.training = False
 
-            self.training = False
+        # ---- Save the trained model ----
+        model_path = os.path.join(results_dir, "dqn_serp")
+        agent.save(model_path)
+        self.get_logger().info(f"Model saved to {model_path}.zip")
 
-            successful_episodes = 0
+        # ---- Evaluate the trained agent ----
+        self.get_logger().info(f"Evaluating for {n_test_episodes} episodes")
+        successful_episodes = 0
+        episode_rewards = []
+        for i in range(n_test_episodes):
+            obs, info = self.reset()
+            terminated = truncated = False
+            ep_reward = 0.0
+            while not (terminated or truncated):
+                action, _ = agent.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = self.step(action)
+                ep_reward += reward
+            episode_rewards.append(ep_reward)
+            if info.get("end_state") == "finished":
+                successful_episodes += 1
+            self.get_logger().info(
+                f"Eval episode {i + 1}/{n_test_episodes}: "
+                f"{info.get('end_state')} reward={ep_reward:.1f}"
+            )
 
-            # Test the agent
-            for i in range(n_test_episodes):
-                self.get_logger().info('Testing episode number ' + str(i + 1) + '.')
-                if self.run_episode(agent): successful_episodes += 1
-            
-            # Calculate the accuracy
-            accuracy = successful_episodes/n_test_episodes
+        accuracy = successful_episodes / n_test_episodes
 
-            self.get_logger().info('Testing finished. Accuracy: ' + str(accuracy))
+        # ---- Persist evaluation summary ----
+        results = {
+            "algorithm": "DQN",
+            "policy": "MlpPolicy",
+            "total_timesteps": total_timesteps,
+            "test_episodes": n_test_episodes,
+            "successful_episodes": successful_episodes,
+            "accuracy": accuracy,
+            "mean_eval_reward": float(np.mean(episode_rewards)),
+            "std_eval_reward": float(np.std(episode_rewards)),
+        }
+        with open(os.path.join(results_dir, "dqn_results.json"), "w") as f:
+            json.dump(results, f, indent=2)
 
-            training_iterations += 1
+        self.get_logger().info(
+            f"Training Finished. Accuracy: {accuracy} "
+            f"({successful_episodes}/{n_test_episodes})  "
+            f"mean eval reward: {results['mean_eval_reward']:.1f}"
+        )
+        # Marker used by the run script to detect completion and tear down.
+        self.get_logger().info("=== RL_RUN_DONE ===")
 
-        self.get_logger().info('Training Finished. Training iterations: ' + str(training_iterations) + '  Accuracy: ' + str(accuracy))
+    def destroy_node(self):
+        self.change_robot_speeds(0.0, 0.0)
+        super().destroy_node()
 
 
-        agent.save("src/ros2_flatland_rl_tutorial/ppo")
+def main(args=None):
+    rclpy.init(args=args)
 
-def main(args = None):
-    rclpy.init()
-    
     serp = SerpControllerEnv()
 
-    thread = threading.Thread(target=serp.run_rl_alg)
+    thread = threading.Thread(target=serp.run_rl_alg, daemon=True)
     thread.start()
 
-    rclpy.spin(serp)
-
+    try:
+        rclpy.spin(serp)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        serp.close()
+        serp.destroy_node()
+        rclpy.shutdown()
 
 
 if __name__ == "__main__":

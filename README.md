@@ -1,5 +1,15 @@
 # Flatland Reinforcement Learning Tutorial using ROS 2
 
+> **📌 Student fork (Daniel Hinojosa).** This fork extends the tutorial by
+> replacing the default **PPO** algorithm with **DQN (Deep Q-Network)** and
+> migrating the environment to the **Gymnasium** API. The full write-up,
+> algorithm justification, results and reflection are in **[`REPORT.md`](REPORT.md)**.
+> Training evidence (learning curve, logs, evaluation scores and the saved
+> model) is in the **[`results/`](results/)** folder. Reproduce with
+> `scripts/run_dqn_training.sh` (see `requirements.txt`).
+
+---
+
 The [previous tutorial](https://github.com/FilipeAlmeidaFEUP/ros2_teleopkeys_tutorial) focused on explaining how to use ROS 2 and Flatland to create a robot and control it. In this tutorial, you will learn how to use Reinforcement Learning (RL) inside the same setup to teach the robot how to perform a simple task. The packages used for the RL algorithms are the [Stable-Baselines3](https://stable-baselines3.readthedocs.io/en/master/) and OpenAI's [Gym](https://www.gymlibrary.dev/).
 
 This tutorial was developed alongside a scientific publication ([link](https://www.researchgate.net/publication/380135583_An_Educational_Kit_for_Simulated_Robot_Learning_in_ROS_2)). If you found this tutorial useful and helpful for your robotics project, we would be grateful if you include the citation below. Thank you!
