@@ -1,0 +1,37 @@
+[
+  {
+    "checkpoint": "dqn_15000_steps.zip",
+    "accuracy": 0.8,
+    "mean_reward": 505.3
+  },
+  {
+    "checkpoint": "dqn_30000_steps.zip",
+    "accuracy": 0.8,
+    "mean_reward": 503.35
+  },
+  {
+    "checkpoint": "dqn_45000_steps.zip",
+    "accuracy": 0.45,
+    "mean_reward": 232.5
+  },
+  {
+    "checkpoint": "dqn_60000_steps.zip",
+    "accuracy": 0.35,
+    "mean_reward": 163.4
+  },
+  {
+    "checkpoint": "dqn_75000_steps.zip",
+    "accuracy": 0.6,
+    "mean_reward": 350.45
+  },
+  {
+    "checkpoint": "dqn_90000_steps.zip",
+    "accuracy": 0.25,
+    "mean_reward": 99.55
+  },
+  {
+    "checkpoint": "dqn_final.zip",
+    "accuracy": 0.3,
+    "mean_reward": 129.0
+  }
+]

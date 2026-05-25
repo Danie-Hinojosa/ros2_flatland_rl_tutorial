@@ -8,3 +8,9 @@ __pycache__/
 
 # Tensorboard logs (we use the Monitor CSV + matplotlib instead)
 results/tb/
+
+# Intermediate training checkpoints: bulky and regenerable. We commit only the
+# selected best model (results/dqn_serp.zip) plus the selection history JSON.
+# Covers both single-run (results/checkpoints/) and per-worker parallel runs
+# (results/parallel/run_*/checkpoints/).
+**/checkpoints/

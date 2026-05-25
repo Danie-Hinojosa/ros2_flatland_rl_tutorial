@@ -2,11 +2,13 @@
 
 > **📌 Student fork (Daniel Hinojosa).** This fork extends the tutorial by
 > replacing the default **PPO** algorithm with **DQN (Deep Q-Network)** and
-> migrating the environment to the **Gymnasium** API. The full write-up,
-> algorithm justification, results and reflection are in **[`REPORT.md`](REPORT.md)**.
-> Training evidence (learning curve, logs, evaluation scores and the saved
-> model) is in the **[`results/`](results/)** folder. Reproduce with
-> `scripts/run_dqn_training.sh` (see `requirements.txt`).
+> migrating the environment to the **Gymnasium** API. The delivered model
+> reaches **90 % eval accuracy (18/20)** using best-checkpoint selection across
+> parallel seeded runs. The full write-up, algorithm justification, results and
+> reflection are in **[`REPORT.md`](REPORT.md)**; training evidence (learning
+> curve, checkpoint-accuracy plot, logs, scores, saved model) is in
+> **[`results/`](results/)**. Reproduce with `scripts/run_dqn_training.sh`
+> (single) or `scripts/run_parallel_dqn.sh` (parallel); see `requirements.txt`.
 
 ---
 

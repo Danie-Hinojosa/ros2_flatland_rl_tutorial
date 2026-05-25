@@ -5,12 +5,12 @@
   "model_selection": "best checkpoint by eval accuracy",
   "best_checkpoint": "dqn_15000_steps.zip",
   "test_episodes": 20,
-  "successful_episodes": 18,
-  "accuracy": 0.9,
-  "mean_eval_reward": 594.75,
+  "successful_episodes": 16,
+  "accuracy": 0.8,
+  "mean_eval_reward": 512.85,
   "eval_end_states": {
-    "finished": 18,
-    "collision": 2,
-    "timeout": 0
+    "finished": 16,
+    "collision": 3,
+    "timeout": 1
   }
 }

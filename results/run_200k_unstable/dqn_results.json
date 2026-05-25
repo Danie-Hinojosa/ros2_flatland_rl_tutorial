@@ -1,0 +1,10 @@
+{
+  "algorithm": "DQN",
+  "policy": "MlpPolicy",
+  "total_timesteps": 200000,
+  "test_episodes": 20,
+  "successful_episodes": 2,
+  "accuracy": 0.1,
+  "mean_eval_reward": -40.8,
+  "std_eval_reward": 225.61972431505185
+}

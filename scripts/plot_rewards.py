@@ -11,6 +11,7 @@ Output: results/reward_curve.png
 """
 import os
 import csv
+import json
 import numpy as np
 import matplotlib
 
@@ -23,6 +24,8 @@ RESULTS_DIR = os.environ.get(
 )
 CSV_PATH = os.path.join(RESULTS_DIR, "dqn_monitor.monitor.csv")
 OUT_PATH = os.path.join(RESULTS_DIR, "reward_curve.png")
+HISTORY_PATH = os.path.join(RESULTS_DIR, "dqn_eval_history.json")
+ACC_OUT_PATH = os.path.join(RESULTS_DIR, "checkpoint_accuracy.png")
 
 
 def load_monitor(path):
@@ -89,6 +92,53 @@ def main():
     fig.tight_layout()
     fig.savefig(OUT_PATH, dpi=120)
     print(f"[plot_rewards] saved {OUT_PATH}  ({len(rewards)} episodes)")
+
+    plot_checkpoint_accuracy()
+
+
+def plot_checkpoint_accuracy():
+    """If a checkpoint-selection history exists, plot accuracy per checkpoint."""
+    if not os.path.exists(HISTORY_PATH):
+        return
+    with open(HISTORY_PATH) as f:
+        history = json.load(f)
+    if not history:
+        return
+
+    # Parse the training timestep from each checkpoint filename. The trailing
+    # "dqn_final" snapshot has no number; place it just past the last numbered
+    # checkpoint so the curve reads left-to-right in training order.
+    def digits_of(entry):
+        d = "".join(c for c in entry["checkpoint"] if c.isdigit())
+        return int(d) if d else None
+
+    numbered = [d for d in (digits_of(h) for h in history) if d is not None]
+    max_step = max(numbered) if numbered else 0
+    gap = (sorted(numbered)[1] - sorted(numbered)[0]) if len(numbered) >= 2 else max(1, max_step)
+
+    def steps_of(entry):
+        d = digits_of(entry)
+        return d if d is not None else max_step + gap  # "final" goes last
+
+    history = sorted(history, key=steps_of)
+    xs = [steps_of(h) for h in history]
+    accs = [h["accuracy"] for h in history]
+
+    best_i = int(np.argmax(accs))
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    ax.plot(xs, accs, "o-", color="tab:purple", label="checkpoint accuracy")
+    ax.scatter([xs[best_i]], [accs[best_i]], color="red", zorder=5, s=90,
+               label=f"best = {accs[best_i]:.2f} @ {xs[best_i]} steps")
+    ax.set_xlabel("Training timesteps (checkpoint)")
+    ax.set_ylabel("Eval accuracy (finish rate)")
+    ax.set_title("DQN checkpoint accuracy — best-model selection")
+    ax.set_ylim(-0.02, 1.02)
+    ax.grid(True, alpha=0.3)
+    ax.legend()
+    fig.tight_layout()
+    fig.savefig(ACC_OUT_PATH, dpi=120)
+    print(f"[plot_rewards] saved {ACC_OUT_PATH}  ({len(history)} checkpoints)")
 
 
 if __name__ == "__main__":

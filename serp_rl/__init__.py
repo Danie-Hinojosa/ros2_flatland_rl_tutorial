@@ -23,6 +23,7 @@ from gymnasium import spaces
 from stable_baselines3 import DQN
 from stable_baselines3.common.env_checker import check_env
 from stable_baselines3.common.monitor import Monitor
+from stable_baselines3.common.callbacks import CheckpointCallback
 
 
 class SerpControllerEnv(Node, gym.Env):
@@ -251,35 +252,61 @@ class SerpControllerEnv(Node, gym.Env):
         if len(data.collisions) > 0:
             self.collision = True
 
-    def run_episode(self, agent):
-        cumulative_reward = 0.0
+    def evaluate_model(self, agent, n_episodes, label=""):
+        """Run `n_episodes` deterministic episodes and return metrics.
 
-        obs, info = self.reset()
-        terminated = False
-        truncated = False
+        Returns (accuracy, mean_reward, end_states) where accuracy is the
+        fraction of episodes that ended in 'finished'. Evaluation always runs
+        with self.training=False so it never pollutes the training log.
+        """
+        was_training = self.training
+        self.training = False
 
-        while not (terminated or truncated):
-            action, _states = agent.predict(obs, deterministic=True)
-            obs, reward, terminated, truncated, info = self.step(action)
-            cumulative_reward += reward
+        successful = 0
+        rewards = []
+        end_states = []
+        for i in range(n_episodes):
+            obs, info = self.reset()
+            terminated = truncated = False
+            ep_reward = 0.0
+            while not (terminated or truncated):
+                action, _ = agent.predict(obs, deterministic=True)
+                obs, reward, terminated, truncated, info = self.step(action)
+                ep_reward += reward
+            rewards.append(ep_reward)
+            end_states.append(info.get("end_state"))
+            if info.get("end_state") == "finished":
+                successful += 1
+            self.get_logger().info(
+                f"  [eval{(' ' + label) if label else ''}] episode {i + 1}/{n_episodes}: "
+                f"{info.get('end_state')} reward={ep_reward:.1f}"
+            )
 
-        self.get_logger().info(
-            f"Episode concluded. End state: {info['end_state']}  Cumulative reward: {cumulative_reward}"
-        )
-
-        return info["end_state"] == "finished"
+        self.training = was_training
+        accuracy = successful / n_episodes
+        return accuracy, float(np.mean(rewards)), end_states
 
     def run_rl_alg(self):
         # ---- Configuration (overridable via environment variables) ----
         # Total training timesteps. Use a small value (e.g. RL_TIMESTEPS=2000)
         # for a quick smoke test, larger for a real training run.
-        total_timesteps = int(os.environ.get("RL_TIMESTEPS", "50000"))
+        total_timesteps = int(os.environ.get("RL_TIMESTEPS", "150000"))
         n_test_episodes = int(os.environ.get("RL_TEST_EPISODES", "20"))
+        # How often (in timesteps) to snapshot a checkpoint during training.
+        checkpoint_freq = int(os.environ.get("RL_CHECKPOINT_FREQ", "15000"))
+        # Episodes used to score each checkpoint when picking the best one.
+        ckpt_eval_episodes = int(os.environ.get("RL_CKPT_EVAL_EPISODES", "20"))
+        # Random seed. Distinct seeds across parallel workers give independent
+        # runs whose best checkpoints we compare to pick a global best model.
+        seed_env = os.environ.get("RL_SEED")
+        seed = int(seed_env) if seed_env not in (None, "") else None
         results_dir = os.environ.get(
             "RL_RESULTS_DIR",
             "/workspace/ros2_ws/src/ros2_flatland_rl_tutorial/results",
         )
         os.makedirs(results_dir, exist_ok=True)
+        ckpt_dir = os.path.join(results_dir, "checkpoints")
+        os.makedirs(ckpt_dir, exist_ok=True)
 
         # Wait until at least one lidar reading exists
         self.wait_lidar_reading()
@@ -311,62 +338,96 @@ class SerpControllerEnv(Node, gym.Env):
             exploration_fraction=0.3,
             exploration_initial_eps=1.0,
             exploration_final_eps=0.05,
+            seed=seed,
         )
 
-        # ---- Train ----
-        self.get_logger().info(f"Starting DQN training for {total_timesteps} timesteps")
+        # ---- Train (single continuous run so the exploration schedule is
+        # correct over the whole budget) while snapshotting checkpoints.
+        # DQN can be unstable: the *final* policy is not necessarily the best,
+        # so we keep periodic checkpoints and pick the best one afterwards.
+        checkpoint_cb = CheckpointCallback(
+            save_freq=checkpoint_freq,
+            save_path=ckpt_dir,
+            name_prefix="dqn",
+        )
+
+        self.get_logger().info(
+            f"Starting DQN training for {total_timesteps} timesteps "
+            f"(checkpoint every {checkpoint_freq}, seed={seed})"
+        )
         self.training = True
         self.reset_counters()
 
-        agent.learn(total_timesteps=total_timesteps, log_interval=10)
+        agent.learn(total_timesteps=total_timesteps, log_interval=10, callback=checkpoint_cb)
 
         self.training = False
 
-        # ---- Save the trained model ----
+        # Always keep the final policy too, for reference.
+        final_path = os.path.join(ckpt_dir, "dqn_final")
+        agent.save(final_path)
+
+        # ---- Pick the best checkpoint by evaluation accuracy ----
+        # Each checkpoint is loaded and scored on ckpt_eval_episodes; the model
+        # with the highest finish-rate is selected (ties broken by reward).
+        candidates = sorted(
+            f for f in os.listdir(ckpt_dir) if f.startswith("dqn") and f.endswith(".zip")
+        )
+        self.get_logger().info(f"Selecting best of {len(candidates)} checkpoints by accuracy")
+
+        history = []
+        best = {"accuracy": -1.0, "mean_reward": float("-inf"), "path": None, "name": None}
+        for name in candidates:
+            path = os.path.join(ckpt_dir, name[:-4])  # strip .zip for DQN.load
+            model = DQN.load(path, env=monitored_env)
+            acc, mean_r, _ = self.evaluate_model(model, ckpt_eval_episodes, label=name)
+            history.append({"checkpoint": name, "accuracy": acc, "mean_reward": mean_r})
+            self.get_logger().info(f"  checkpoint {name}: accuracy={acc:.2f} mean_reward={mean_r:.1f}")
+            if (acc, mean_r) > (best["accuracy"], best["mean_reward"]):
+                best = {"accuracy": acc, "mean_reward": mean_r, "path": path, "name": name}
+
+        with open(os.path.join(results_dir, "dqn_eval_history.json"), "w") as f:
+            json.dump(history, f, indent=2)
+
+        # ---- Final evaluation of the best checkpoint (reported number) ----
+        best_agent = DQN.load(best["path"], env=monitored_env)
+        self.get_logger().info(
+            f"Best checkpoint: {best['name']} (selection accuracy {best['accuracy']:.2f}). "
+            f"Final evaluation over {n_test_episodes} episodes:"
+        )
+        accuracy, mean_reward, end_states = self.evaluate_model(
+            best_agent, n_test_episodes, label="final"
+        )
+
+        # ---- Save the best model as the delivered model ----
         model_path = os.path.join(results_dir, "dqn_serp")
-        agent.save(model_path)
-        self.get_logger().info(f"Model saved to {model_path}.zip")
-
-        # ---- Evaluate the trained agent ----
-        self.get_logger().info(f"Evaluating for {n_test_episodes} episodes")
-        successful_episodes = 0
-        episode_rewards = []
-        for i in range(n_test_episodes):
-            obs, info = self.reset()
-            terminated = truncated = False
-            ep_reward = 0.0
-            while not (terminated or truncated):
-                action, _ = agent.predict(obs, deterministic=True)
-                obs, reward, terminated, truncated, info = self.step(action)
-                ep_reward += reward
-            episode_rewards.append(ep_reward)
-            if info.get("end_state") == "finished":
-                successful_episodes += 1
-            self.get_logger().info(
-                f"Eval episode {i + 1}/{n_test_episodes}: "
-                f"{info.get('end_state')} reward={ep_reward:.1f}"
-            )
-
-        accuracy = successful_episodes / n_test_episodes
+        best_agent.save(model_path)
+        self.get_logger().info(f"Best model saved to {model_path}.zip")
 
         # ---- Persist evaluation summary ----
+        successful_episodes = sum(1 for s in end_states if s == "finished")
         results = {
             "algorithm": "DQN",
             "policy": "MlpPolicy",
             "total_timesteps": total_timesteps,
+            "model_selection": "best checkpoint by eval accuracy",
+            "best_checkpoint": best["name"],
             "test_episodes": n_test_episodes,
             "successful_episodes": successful_episodes,
             "accuracy": accuracy,
-            "mean_eval_reward": float(np.mean(episode_rewards)),
-            "std_eval_reward": float(np.std(episode_rewards)),
+            "mean_eval_reward": mean_reward,
+            "eval_end_states": {
+                "finished": end_states.count("finished"),
+                "collision": end_states.count("collision"),
+                "timeout": end_states.count("timeout"),
+            },
         }
         with open(os.path.join(results_dir, "dqn_results.json"), "w") as f:
             json.dump(results, f, indent=2)
 
         self.get_logger().info(
-            f"Training Finished. Accuracy: {accuracy} "
-            f"({successful_episodes}/{n_test_episodes})  "
-            f"mean eval reward: {results['mean_eval_reward']:.1f}"
+            f"Training Finished. Best checkpoint {best['name']}  "
+            f"Accuracy: {accuracy} ({successful_episodes}/{n_test_episodes})  "
+            f"mean eval reward: {mean_reward:.1f}"
         )
         # Marker used by the run script to detect completion and tear down.
         self.get_logger().info("=== RL_RUN_DONE ===")

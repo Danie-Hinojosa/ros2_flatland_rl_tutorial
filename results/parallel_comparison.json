@@ -1,0 +1,39 @@
+{
+  "n_workers": 4,
+  "winner": "run_1",
+  "winner_accuracy": 0.9,
+  "runs": [
+    {
+      "worker": "run_1",
+      "accuracy": 0.9,
+      "mean_eval_reward": 594.75,
+      "best_checkpoint": "dqn_15000_steps.zip",
+      "successful_episodes": 18,
+      "test_episodes": 20
+    },
+    {
+      "worker": "run_3",
+      "accuracy": 0.8,
+      "mean_eval_reward": 512.85,
+      "best_checkpoint": "dqn_15000_steps.zip",
+      "successful_episodes": 16,
+      "test_episodes": 20
+    },
+    {
+      "worker": "run_0",
+      "accuracy": 0.7,
+      "mean_eval_reward": 424.45,
+      "best_checkpoint": "dqn_15000_steps.zip",
+      "successful_episodes": 14,
+      "test_episodes": 20
+    },
+    {
+      "worker": "run_2",
+      "accuracy": 0.65,
+      "mean_eval_reward": 389.0,
+      "best_checkpoint": "dqn_15000_steps.zip",
+      "successful_episodes": 13,
+      "test_episodes": 20
+    }
+  ]
+}
